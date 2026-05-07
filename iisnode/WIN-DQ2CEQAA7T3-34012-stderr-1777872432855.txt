@@ -1,0 +1,4 @@
+SyntaxError: Unterminated string in JSON at position 129 (line 1 column 130)
+    at JSON.parse (<anonymous>)
+    at exports.updateProject (C:\inetpub\vhosts\xmp_ai\controllers\admin.controller.js:444:32)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
