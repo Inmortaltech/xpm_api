@@ -17,7 +17,9 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Routes
 const adminRoutes = require("./routes/admin.routes");
+const authRoutes = require("./routes/auth.routes");
 app.use("/api/admin", adminRoutes);
+app.use("/api/auth", authRoutes);
 
 // DB Sync
 sequelize.sync()

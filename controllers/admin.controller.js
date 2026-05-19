@@ -1,6 +1,81 @@
 const User = require("../models/admin.model");
 const sequelize =require("../config/db");
 
+const toBool = (v) => {
+  if (v === 'true' || v === true || v === 1 || v === '1' || v === 'on' || v === 'TRUE' || v === 'yes' || v === 'YES') {
+    return 1;
+  }
+  return 0;
+};
+
+const ensureResourcesTable = async () => {
+  const createTableSql = `
+    CREATE TABLE IF NOT EXISTS resources (
+      id INT NOT NULL AUTO_INCREMENT,
+      resource_type VARCHAR(100) DEFAULT NULL,
+      name VARCHAR(255) DEFAULT NULL,
+      role VARCHAR(255) DEFAULT NULL,
+      email VARCHAR(255) DEFAULT NULL,
+      mobile VARCHAR(20) DEFAULT NULL,
+      shift VARCHAR(100) DEFAULT NULL,
+      salary_ctc DECIMAL(15,2) DEFAULT NULL,
+      start_time VARCHAR(50) DEFAULT NULL,
+      end_time VARCHAR(50) DEFAULT NULL,
+      experience VARCHAR(100) DEFAULT NULL,
+      salary_per_hours DECIMAL(15,2) DEFAULT NULL,
+      unit_bag_kg DECIMAL(15,2) DEFAULT NULL,
+      rate_per_unit DECIMAL(15,2) DEFAULT NULL,
+      \`date\` DATE DEFAULT NULL,
+      \`time\` TIME DEFAULT NULL,
+      rate DECIMAL(15,2) DEFAULT NULL,
+      cost DECIMAL(15,2) DEFAULT NULL,
+      image VARCHAR(255) DEFAULT NULL,
+      monday TINYINT(1) DEFAULT 0,
+      tuesday TINYINT(1) DEFAULT 0,
+      wednesday TINYINT(1) DEFAULT 0,
+      thursday TINYINT(1) DEFAULT 0,
+      friday TINYINT(1) DEFAULT 0,
+      saturday TINYINT(1) DEFAULT 0,
+      sunday TINYINT(1) DEFAULT 0,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `;
+
+  await sequelize.query(createTableSql);
+
+  // Ensure missing columns are added if the table already existed
+  const columnsToAdd = [
+    { name: 'shift', type: 'VARCHAR(100) DEFAULT NULL' },
+    { name: 'monday', type: 'TINYINT(1) DEFAULT 0' },
+    { name: 'tuesday', type: 'TINYINT(1) DEFAULT 0' },
+    { name: 'wednesday', type: 'TINYINT(1) DEFAULT 0' },
+    { name: 'thursday', type: 'TINYINT(1) DEFAULT 0' },
+    { name: 'friday', type: 'TINYINT(1) DEFAULT 0' },
+    { name: 'saturday', type: 'TINYINT(1) DEFAULT 0' },
+    { name: 'sunday', type: 'TINYINT(1) DEFAULT 0' }
+  ];
+
+  for (const col of columnsToAdd) {
+    try {
+      await sequelize.query(`ALTER TABLE resources ADD COLUMN ${col.name} ${col.type}`);
+      console.log(`Added missing column: ${col.name}`);
+    } catch (err) {
+      // Column probably already exists, ignore error
+    }
+  }
+};
+
+const ensureProjectsTable = async () => {
+  try {
+    await sequelize.query(`ALTER TABLE projects ADD COLUMN resource_allocations LONGTEXT DEFAULT NULL`);
+  } catch (err) {
+    // Column probably already exists
+  }
+};
+
 exports.createUser = async (req, res) => {
   try {
     const { name, email, password, role, user_type, mobile } = req.body;
@@ -227,6 +302,7 @@ exports.createProject = async (req, res) => {
 
 exports.addProject = async (req, res) => {
   const t = await sequelize.transaction();
+  await ensureProjectsTable();
 
   try {
     const files = req.files; // multiple files
@@ -239,6 +315,8 @@ exports.addProject = async (req, res) => {
       end_date,
       duration,
       project_manager,
+      technical_lead,
+      technology,
       project_type,
       priority,
       methodology,
@@ -248,7 +326,8 @@ exports.addProject = async (req, res) => {
       budget,
       no_billing,
       contacts,
-      milestones
+      milestones,
+      resource_allocations
     } = req.body;
 
     const status = "Allocated";
@@ -264,6 +343,7 @@ exports.addProject = async (req, res) => {
 
     contacts = parseJSON(contacts);
     milestones = parseJSON(milestones);
+    resource_allocations = parseJSON(resource_allocations);
 
     // =========================
     // BUILD DATA OBJECT
@@ -276,6 +356,8 @@ exports.addProject = async (req, res) => {
       end_date,
       duration,
       project_manager,
+      technical_lead,
+      technology,
       project_type,
       priority,
       methodology,
@@ -308,6 +390,10 @@ exports.addProject = async (req, res) => {
 
     if (milestones) {
       data.milestones = JSON.stringify(milestones);
+    }
+
+    if (resource_allocations) {
+      data.resource_allocations = JSON.stringify(resource_allocations);
     }
 
     // =========================
@@ -375,7 +461,8 @@ exports.getProjectList = async (req, res) => {
     const data = rows.map((item) => ({
       ...item,
       contacts: parseJSON(item.contacts),
-      milestones: parseJSON(item.milestones)
+      milestones: parseJSON(item.milestones),
+      resource_allocations: parseJSON(item.resource_allocations)
     }));
 
     return res.status(200).json({
@@ -390,6 +477,78 @@ exports.getProjectList = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message
+    });
+  }
+};
+
+exports.getAllProjects = async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim();
+    const status = String(req.query.status || "").trim();
+    const replacements = {};
+    const whereClauses = [];
+
+    if (search) {
+      replacements.search = `%${search}%`;
+      whereClauses.push(
+        `(p.project_name LIKE :search OR p.project_code LIKE :search OR p.company_name LIKE :search OR p.project_manager LIKE :search)`
+      );
+    }
+
+    if (status) {
+      replacements.status = status;
+      whereClauses.push(`p.status = :status`);
+    }
+
+    const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+    const [rows] = await sequelize.query(
+      `
+      SELECT
+        p.id,
+        p.project_code,
+        p.project_name,
+        p.budget,
+        p.priority,
+        p.duration,
+        p.start_date,
+        p.end_date,
+        p.company_name,
+        p.project_manager,
+        p.status
+      FROM projects p
+      ${whereSql}
+      ORDER BY p.id DESC
+      `,
+      { replacements }
+    );
+
+    const data = rows.map((project) => ({
+      id: project.id,
+      projectCode: project.project_code || "",
+      projectName: project.project_name || "-",
+      budget: project.budget ?? "-",
+      cost: project.budget ?? "-",
+      priority: project.priority || "-",
+      schedule: project.duration ? `${project.duration} days` : "-",
+      plannedStartDate: project.start_date || "-",
+      deadline: project.end_date || "-",
+      clientName: project.company_name || "-",
+      pm: project.project_manager || "-",
+      status: project.status || "Pending",
+    }));
+
+    return res.status(200).json({
+      success: true,
+      count: data.length,
+      data,
+    });
+  } catch (error) {
+    console.error("Get All Projects Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+      error: error.message,
     });
   }
 };
@@ -428,6 +587,8 @@ exports.updateProject = async (req, res) => {
       end_date,
       duration,
       project_manager,
+      technical_lead,
+      technology,
       project_type,
       priority,
       methodology,
@@ -439,10 +600,12 @@ exports.updateProject = async (req, res) => {
       status,
       contacts,
       milestones,
+      resource_allocations,
     } = req.body;
 
     contacts = contacts ? JSON.parse(contacts) : [];
     milestones = milestones ? JSON.parse(milestones) : [];
+    resource_allocations = resource_allocations ? JSON.parse(resource_allocations) : [];
 
     const safe = (val) => (val !== undefined && val !== "" ? val : null);
 
@@ -493,6 +656,8 @@ exports.updateProject = async (req, res) => {
         end_date = :end_date,
         duration = :duration,
         project_manager = :project_manager,
+        technical_lead = :technical_lead,
+        technology = :technology,
         project_type = :project_type,
         priority = :priority,
         methodology = :methodology,
@@ -505,7 +670,8 @@ exports.updateProject = async (req, res) => {
         no_billing = :no_billing,
         status = :status,
         contacts = :contacts,
-        milestones = :milestones
+        milestones = :milestones,
+        resource_allocations = :resource_allocations
       WHERE id = :id`,
       {
         replacements: {
@@ -516,6 +682,8 @@ exports.updateProject = async (req, res) => {
           end_date: safe(end_date),
           duration: safe(duration),
           project_manager: safe(project_manager),
+          technical_lead: safe(technical_lead),
+          technology: safe(technology),
           project_type: safe(project_type),
           priority: safe(priority),
           methodology: safe(methodology),
@@ -529,6 +697,7 @@ exports.updateProject = async (req, res) => {
           status: safe(status),
           contacts: JSON.stringify(contacts),
           milestones: JSON.stringify(milestones),
+          resource_allocations: JSON.stringify(resource_allocations),
         },
         transaction: t,
       }
@@ -556,6 +725,9 @@ exports.updateProject = async (req, res) => {
 
 exports.createResource = async (req, res) => {
   try {
+    await ensureResourcesTable();
+
+    console.log("Create Resource Body:", req.body);
     const {
       resource_type,
       name,
@@ -574,72 +746,82 @@ exports.createResource = async (req, res) => {
       time,
       rate,
       cost,
+      monday,
+      tuesday,
+      wednesday,
+      thursday,
+      friday,
+      saturday,
+      sunday,
     } = req.body;
 
     const image = req.file ? req.file.filename : null;
-	const is_active = "1";
+    const is_active = 1;
 
     const sql = `
       INSERT INTO resources (
-        resource_type,
-        name,
-        role,
-        email,
-        mobile,
-        shift,
-        salary_ctc,
-        start_time,
-        end_time,
-        experience,
-        salary_per_hours,
-        unit_bag_kg,
-        rate_per_unit,
-        date,
-        time,
-        rate,
-        cost,
-        image,
-        created_at,
-		is_active
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+        resource_type, name, role, email, mobile, shift, salary_ctc,
+        start_time, end_time, experience, salary_per_hours, unit_bag_kg,
+        rate_per_unit, \`date\`, \`time\`, rate, cost, image,
+        monday, tuesday, wednesday, thursday, friday, saturday, sunday,
+        created_at, is_active
+      ) VALUES (
+        :resource_type, :name, :role, :email, :mobile, :shift, :salary_ctc,
+        :start_time, :end_time, :experience, :salary_per_hours, :unit_bag_kg,
+        :rate_per_unit, :date, :time, :rate, :cost, :image,
+        :monday, :tuesday, :wednesday, :thursday, :friday, :saturday, :sunday,
+        NOW(), :is_active
+      )
     `;
 
-    const values = [
-      resource_type || null,
-      name || null,
-      role || null,
-      email || null,
-      mobile || null,
-      shift || null,
-      salary_ctc || null,
-      start_time || null,
-      end_time || null,
-      experience || null,
-      salary_per_hours || null,
-      unit_bag_kg || null,
-      rate_per_unit || null,
-      date || null,
-      time || null,
-      rate || null,
-      cost || null,
-      image,
-	  is_active
-    ];
+    const replacements = {
+      resource_type: resource_type || null,
+      name: name || null,
+      role: role || null,
+      email: email || null,
+      mobile: mobile || null,
+      shift: shift || null,
+      salary_ctc: salary_ctc || null,
+      start_time: start_time || null,
+      end_time: end_time || null,
+      experience: experience || null,
+      salary_per_hours: salary_per_hours || null,
+      unit_bag_kg: unit_bag_kg || null,
+      rate_per_unit: rate_per_unit || null,
+      date: date || null,
+      time: time || null,
+      rate: rate || null,
+      cost: cost || null,
+      image: image,
+      monday: toBool(monday),
+      tuesday: toBool(tuesday),
+      wednesday: toBool(wednesday),
+      thursday: toBool(thursday),
+      friday: toBool(friday),
+      saturday: toBool(saturday),
+      sunday: toBool(sunday),
+      is_active: is_active
+    };
+
+    console.log("Create Resource Replacements:", replacements);
 
     const [result] = await sequelize.query(sql, {
-      replacements: values,
+      replacements: replacements,
+      type: sequelize.QueryTypes.INSERT
     });
+
+    const insertId = result; // result is usually the insertId for INSERT queries in MySQL
 
     return res.status(200).json({
       success: true,
       message: "Resource created successfully",
-      insertId: result.insertId,
+      id: insertId,
     });
 
   } catch (error) {
     console.error("Create Resource Error:", error);
 
-    return res.status(201).json({
+    return res.status(500).json({
       success: false,
       message: "Internal Server Error",
       error: error.message,
@@ -649,6 +831,8 @@ exports.createResource = async (req, res) => {
 
 exports.getAllResources = async (req, res) => {
   try {
+    await ensureResourcesTable();
+
     const sql = `
       SELECT * 
       FROM resources 
@@ -676,6 +860,8 @@ exports.getAllResources = async (req, res) => {
 
 exports.updateResource = async (req, res) => {
   try {
+    await ensureResourcesTable();
+
     const {
       id,
       resource_type,
@@ -695,6 +881,13 @@ exports.updateResource = async (req, res) => {
       time,
       rate,
       cost,
+      monday,
+      tuesday,
+      wednesday,
+      thursday,
+      friday,
+      saturday,
+      sunday,
     } = req.body;
 
     if (!id) {
@@ -708,51 +901,68 @@ exports.updateResource = async (req, res) => {
 
     const sql = `
       UPDATE resources SET
-        resource_type = ?,
-        name = ?,
-        role = ?,
-        email = ?,
-        mobile = ?,
-        shift = ?,
-        salary_ctc = ?,
-        start_time = ?,
-        end_time = ?,
-        experience = ?,
-        salary_per_hours = ?,
-        unit_bag_kg = ?,
-        rate_per_unit = ?,
-        \`date\` = ?,
-        \`time\` = ?,
-        rate = ?,
-        cost = ?,
-        image = COALESCE(?, image)
-      WHERE id = ?
+        resource_type = :resource_type,
+        name = :name,
+        role = :role,
+        email = :email,
+        mobile = :mobile,
+        shift = :shift,
+        salary_ctc = :salary_ctc,
+        start_time = :start_time,
+        end_time = :end_time,
+        experience = :experience,
+        salary_per_hours = :salary_per_hours,
+        unit_bag_kg = :unit_bag_kg,
+        rate_per_unit = :rate_per_unit,
+        \`date\` = :date,
+        \`time\` = :time,
+        rate = :rate,
+        cost = :cost,
+        image = COALESCE(:image, image),
+        monday = :monday,
+        tuesday = :tuesday,
+        wednesday = :wednesday,
+        thursday = :thursday,
+        friday = :friday,
+        saturday = :saturday,
+        sunday = :sunday
+      WHERE id = :id
     `;
 
-    const values = [
-      resource_type || null,
-      name || null,
-      role || null,
-      email || null,
-      mobile || null,
-      shift || null,
-      salary_ctc || null,
-      start_time || null,
-      end_time || null,
-      experience || null,
-      salary_per_hours || null,
-      unit_bag_kg || null,
-      rate_per_unit || null,
-      date || null,
-      time || null,
-      rate || null,
-      cost || null,
-      image,
-      id,
-    ];
+    const replacements = {
+      id: id,
+      resource_type: resource_type || null,
+      name: name || null,
+      role: role || null,
+      email: email || null,
+      mobile: mobile || null,
+      shift: shift || null,
+      salary_ctc: salary_ctc || null,
+      start_time: start_time || null,
+      end_time: end_time || null,
+      experience: experience || null,
+      salary_per_hours: salary_per_hours || null,
+      unit_bag_kg: unit_bag_kg || null,
+      rate_per_unit: rate_per_unit || null,
+      date: date || null,
+      time: time || null,
+      rate: rate || null,
+      cost: cost || null,
+      image: image,
+      monday: toBool(monday),
+      tuesday: toBool(tuesday),
+      wednesday: toBool(wednesday),
+      thursday: toBool(thursday),
+      friday: toBool(friday),
+      saturday: toBool(saturday),
+      sunday: toBool(sunday)
+    };
+
+    console.log("Update Resource Replacements:", replacements);
 
     await sequelize.query(sql, {
-      replacements: values,
+      replacements: replacements,
+      type: sequelize.QueryTypes.UPDATE
     });
 
     return res.status(200).json({
@@ -768,5 +978,238 @@ exports.updateResource = async (req, res) => {
       message: "Server Error",
       error: error.message,
     });
+  }
+};
+
+exports.deactivateResource = async (req, res) => {
+  try {
+    const { id, is_active } = req.body;
+    
+    if (!id) {
+      return res.status(400).json({ success: false, message: "ID is required" });
+    }
+
+    await sequelize.query(
+      "UPDATE resources SET is_active = :is_active WHERE id = :id",
+      { replacements: { is_active, id } }
+    );
+
+    res.json({ success: true, message: "Resource status updated" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ─── Ensure Holidays Table ────────────────────────────────────────────────────
+const ensureHolidaysTable = async () => {
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS \`holidays\` (
+      \`id\`           INT          NOT NULL AUTO_INCREMENT,
+      \`holiday_date\` DATE         NOT NULL,
+      \`title\`        VARCHAR(255) NOT NULL,
+      \`description\`  TEXT         DEFAULT NULL,
+      \`is_active\`    TINYINT(1)   NOT NULL DEFAULT 1,
+      \`created_at\`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      \`updated_at\`   DATETIME         NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (\`id\`),
+      UNIQUE KEY \`uq_holiday_date\` (\`holiday_date\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+};
+
+// GET /admin/holidays – list all active holidays
+exports.getHolidays = async (req, res) => {
+  try {
+    await ensureHolidaysTable();
+    const [rows] = await sequelize.query(
+      `SELECT id, holiday_date, title, description, is_active
+       FROM holidays
+       WHERE is_active = 1
+       ORDER BY holiday_date ASC`
+    );
+    return res.status(200).json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Get Holidays Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /admin/add_holiday – add a new holiday
+exports.addHoliday = async (req, res) => {
+  try {
+    await ensureHolidaysTable();
+    const { holiday_date, title, description } = req.body;
+    if (!holiday_date || !title) {
+      return res.status(400).json({ success: false, message: "holiday_date and title are required" });
+    }
+
+    // Pre-check for duplicate holiday dates to avoid DB constraint unique key errors (500)
+    const existing = await sequelize.query(
+      `SELECT id, is_active FROM holidays WHERE holiday_date = :holiday_date LIMIT 1`,
+      { replacements: { holiday_date }, type: sequelize.QueryTypes.SELECT }
+    );
+
+    if (existing && existing.length > 0) {
+      const row = existing[0];
+      const isActiveVal = row.is_active instanceof Buffer ? row.is_active[0] : row.is_active;
+      if (parseInt(isActiveVal) === 1) {
+        return res.status(400).json({ success: false, message: "A holiday already exists on this date." });
+      } else {
+        // Reactivate soft-deleted holiday
+        await sequelize.query(
+          `UPDATE holidays SET title = :title, description = :description, is_active = 1 WHERE id = :id`,
+          { replacements: { id: row.id, title, description: description || null } }
+        );
+        return res.status(200).json({ success: true, message: "Holiday added (reactivated) successfully" });
+      }
+    }
+
+    await sequelize.query(
+      `INSERT INTO holidays (holiday_date, title, description)
+       VALUES (:holiday_date, :title, :description)`,
+      { replacements: { holiday_date, title, description: description || null } }
+    );
+    return res.status(201).json({ success: true, message: "Holiday added successfully" });
+  } catch (error) {
+    console.error("Add Holiday Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /admin/update_holiday – update an existing holiday
+exports.updateHoliday = async (req, res) => {
+  try {
+    await ensureHolidaysTable();
+    const { id, holiday_date, title, description, is_active } = req.body;
+    if (!id) return res.status(400).json({ success: false, message: "id is required" });
+    await sequelize.query(
+      `UPDATE holidays SET
+        holiday_date = :holiday_date,
+        title        = :title,
+        description  = :description,
+        is_active    = :is_active
+       WHERE id = :id`,
+      {
+        replacements: {
+          id, holiday_date, title,
+          description: description || null,
+          is_active: is_active !== undefined ? (is_active ? 1 : 0) : 1,
+        }
+      }
+    );
+    return res.status(200).json({ success: true, message: "Holiday updated successfully" });
+  } catch (error) {
+    console.error("Update Holiday Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// POST /admin/delete_holiday – soft-delete (deactivate) a holiday
+exports.deleteHoliday = async (req, res) => {
+  try {
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ success: false, message: "id is required" });
+    await sequelize.query(
+      `UPDATE holidays SET is_active = 0 WHERE id = :id`,
+      { replacements: { id } }
+    );
+    return res.status(200).json({ success: true, message: "Holiday deleted successfully" });
+  } catch (error) {
+    console.error("Delete Holiday Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// GET /admin/check_holidays?start_date=YYYY-MM-DD&duration=N&exclude_weekends=0|1
+// Returns the calculated end_date (skipping holidays + optionally weekends)
+// and the list of holidays encountered in that range.
+exports.checkHolidays = async (req, res) => {
+  try {
+    await ensureHolidaysTable();
+
+    const { start_date, duration, exclude_weekends } = req.query;
+    if (!start_date || !duration) {
+      return res.status(400).json({ success: false, message: "start_date and duration are required" });
+    }
+
+    const n = parseInt(duration);
+    const excludeWeekends = exclude_weekends === "1" || exclude_weekends === "true";
+
+    if (isNaN(n) || n <= 0) {
+      return res.status(400).json({ success: false, message: "duration must be a positive integer" });
+    }
+
+    // ── Helper: parse "YYYY-MM-DD" as LOCAL date (avoid UTC midnight shift) ──
+    const parseLocalDate = (str) => {
+      const [y, m, d] = str.split("-").map(Number);
+      return new Date(y, m - 1, d); // local midnight
+    };
+
+    // ── Helper: format a local Date to "YYYY-MM-DD" ──
+    const toLocalKey = (date) => {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, "0");
+      const d = String(date.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    };
+
+    // Fetch all active holidays
+    const [holidayRows] = await sequelize.query(
+      `SELECT holiday_date, title FROM holidays WHERE is_active = 1`
+    );
+
+    // Build a Set of holiday date strings "YYYY-MM-DD"
+    const holidaySet = new Set();
+    const holidayMap = {};
+
+    holidayRows.forEach(row => {
+      // MySQL returns DATE as a JS Date object (UTC midnight) — use toLocalKey safely
+      const d = new Date(row.holiday_date);
+      // Extract MM-DD from the UTC date (DATE columns don't have time, so UTC is fine here)
+      const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day   = String(d.getUTCDate()).padStart(2, "0");
+      const year  = d.getUTCFullYear();
+
+      const key = `${year}-${month}-${day}`;
+      holidaySet.add(key);
+      holidayMap[key] = row.title;
+    });
+
+    // Walk forward day-by-day using LOCAL dates
+    let cursor = parseLocalDate(start_date);
+    let added = 0;
+    const skippedHolidays = [];
+
+    while (added < n) {
+      cursor.setDate(cursor.getDate() + 1);
+      const dayOfWeek = cursor.getDay(); // 0=Sun, 6=Sat
+      const key = toLocalKey(cursor);
+
+      // Skip weekends if requested
+      if (excludeWeekends && (dayOfWeek === 0 || dayOfWeek === 6)) continue;
+
+      // Skip holidays
+      if (holidaySet.has(key)) {
+        skippedHolidays.push({ date: key, title: holidayMap[key] });
+        continue;
+      }
+
+      added++;
+    }
+
+    const endDate = toLocalKey(cursor);
+
+    return res.status(200).json({
+      success: true,
+      start_date,
+      duration: n,
+      end_date: endDate,
+      holidays_skipped: skippedHolidays,
+      holidays_found: skippedHolidays.length > 0,
+    });
+
+  } catch (error) {
+    console.error("Check Holidays Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
