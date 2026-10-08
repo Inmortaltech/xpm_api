@@ -1,5 +1,0 @@
-◇ injected env (7) from .env // tip: ⌘ suppress logs { quiet: true }
-◇ injected env (0) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
-Server running on port \\.\pipe\587ecc8a-6338-4c90-bc6f-068e519349b4
- DB Connected
-Tables synced

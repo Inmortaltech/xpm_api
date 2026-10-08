@@ -1,5 +1,6 @@
 const User = require("../models/admin.model");
 const sequelize =require("../config/db");
+const { hashPassword } = require("../middleware/auth");
 
 const toBool = (v) => {
   if (v === 'true' || v === true || v === 1 || v === '1' || v === 'on' || v === 'TRUE' || v === 'yes' || v === 'YES') {
@@ -96,12 +97,12 @@ exports.createUser = async (req, res) => {
     const user = await User.create({
       name,
       email,
-      password,
+      password: password ? await hashPassword(password) : null,
       role,
       user_type,
 	  status,
 	  mobile,
-      image 
+      image
     });
 
     res.json({
@@ -131,7 +132,9 @@ exports.getUsers = async (req, res) => {
         email: user.email,
         role: user.role,
         user_type: user.user_type,
-		password: user.password,
+		// password intentionally NOT returned (was a plaintext leak).
+		// The edit form treats a blank password field as "keep existing".
+		has_password: !!user.password,
 		status: user.status,
 		mobile: user.mobile,
         image: user.image ? `${baseUrl}/${user.image}` : null,
@@ -188,21 +191,20 @@ exports.updateUser = async (req, res) => {
     //  Handle image update
     const image = req.file ? req.file.filename : user.image;
 
-    //  Update user
-    await user.update({
-      name,
-      email,
-      password,
-      role,
-      user_type,
-	  mobile,
-      image,
-    });
+    //  Update user — blank / masked password means "keep the existing one"
+    const patch = { name, email, role, user_type, mobile, image };
+    if (password && String(password).trim() && String(password).trim() !== "********") {
+      patch.password = await hashPassword(String(password).trim());
+    }
+    await user.update(patch);
+
+    const safeUser = user.toJSON ? user.toJSON() : { ...user };
+    delete safeUser.password;
 
     res.json({
       success: true,
       message: "User updated successfully",
-      data: user,
+      data: safeUser,
     });
 
   } catch (error) {
@@ -210,6 +212,68 @@ exports.updateUser = async (req, res) => {
       success: false,
       message: error.message,
     });
+  }
+};
+
+// ── Self-service profile ──────────────────────────────────────────────────
+//  GET  /api/admin/me              -> the signed-in user's own record
+//  POST /api/admin/update_profile  -> name / mobile / image / password only
+//                                     (role, status, email stay server-owned)
+exports.getMe = async (req, res) => {
+  try {
+    const id = req.user && req.user.id;
+    if (!id) return res.status(401).json({ success: false, message: "Not authenticated" });
+    const user = await User.findByPk(id);
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    const baseUrl = `${req.protocol}://${req.get("host")}/uploads`;
+    return res.json({
+      success: true,
+      data: {
+        id: user.id, name: user.name, email: user.email, role: user.role,
+        user_type: user.user_type, status: user.status, mobile: user.mobile,
+        image: user.image ? `${baseUrl}/${user.image}` : null,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.updateProfile = async (req, res) => {
+  try {
+    const id = req.user && req.user.id;
+    if (!id) return res.status(401).json({ success: false, message: "Not authenticated" });
+    const user = await User.findByPk(id);
+    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+
+    const { name, mobile, password } = req.body || {};
+    const patch = {};
+    if (name != null && String(name).trim()) patch.name = String(name).trim();
+    if (mobile != null) patch.mobile = String(mobile).trim();
+    if (req.file) patch.image = req.file.filename;
+    if (password && String(password).trim() && String(password).trim() !== "********") {
+      if (String(password).trim().length < 6) {
+        return res.status(400).json({ success: false, message: "Password must be at least 6 characters" });
+      }
+      patch.password = await hashPassword(String(password).trim());
+    }
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ success: false, message: "Nothing to update" });
+    }
+    await user.update(patch);
+
+    const baseUrl = `${req.protocol}://${req.get("host")}/uploads`;
+    return res.json({
+      success: true,
+      message: "Profile updated",
+      data: {
+        id: user.id, name: user.name, email: user.email, role: user.role,
+        user_type: user.user_type, status: user.status, mobile: user.mobile,
+        image: user.image ? `${baseUrl}/${user.image}` : null,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -344,6 +408,19 @@ exports.addProject = async (req, res) => {
     contacts = parseJSON(contacts);
     milestones = parseJSON(milestones);
     resource_allocations = parseJSON(resource_allocations);
+
+    // multipart forms can send the literal string "null"/"undefined" — normalise
+    const clean = (v, dflt = null) =>
+      v == null || v === "" || v === "null" || v === "undefined" ? dflt : v;
+    priority = clean(priority, "Medium");
+    methodology = clean(methodology);
+    project_type = clean(project_type);
+    project_scope = clean(project_scope);
+    company_name = clean(company_name);
+    location = clean(location);
+    technology = clean(technology);
+    technical_lead = clean(technical_lead);
+    project_manager = clean(project_manager);
 
     // =========================
     // BUILD DATA OBJECT
@@ -607,7 +684,9 @@ exports.updateProject = async (req, res) => {
     milestones = milestones ? JSON.parse(milestones) : [];
     resource_allocations = resource_allocations ? JSON.parse(resource_allocations) : [];
 
-    const safe = (val) => (val !== undefined && val !== "" ? val : null);
+    // treat the literal strings "null"/"undefined" (multipart form artefacts) as empty
+    const safe = (val) =>
+      val !== undefined && val !== "" && val !== "null" && val !== "undefined" ? val : null;
 
     // =========================
     // VALIDATION
@@ -758,17 +837,31 @@ exports.createResource = async (req, res) => {
     const image = req.file ? req.file.filename : null;
     const is_active = 1;
 
+    // Celoxis resource economics — added by db_bkp/xmp_db_celoxis_polish.sql
+    const { cost_rate, bill_rate, capacity_hours } = req.body;
+    try {
+      await sequelize.query(`ALTER TABLE resources ADD COLUMN cost_rate DECIMAL(10,2) DEFAULT NULL`);
+    } catch (e) { /* exists */ }
+    try {
+      await sequelize.query(`ALTER TABLE resources ADD COLUMN bill_rate DECIMAL(10,2) DEFAULT NULL`);
+    } catch (e) { /* exists */ }
+    try {
+      await sequelize.query(`ALTER TABLE resources ADD COLUMN capacity_hours DECIMAL(4,1) DEFAULT 8`);
+    } catch (e) { /* exists */ }
+
     const sql = `
       INSERT INTO resources (
         resource_type, name, role, email, mobile, shift, salary_ctc,
         start_time, end_time, experience, salary_per_hours, unit_bag_kg,
         rate_per_unit, \`date\`, \`time\`, rate, cost, image,
+        cost_rate, bill_rate, capacity_hours,
         monday, tuesday, wednesday, thursday, friday, saturday, sunday,
         created_at, is_active
       ) VALUES (
         :resource_type, :name, :role, :email, :mobile, :shift, :salary_ctc,
         :start_time, :end_time, :experience, :salary_per_hours, :unit_bag_kg,
         :rate_per_unit, :date, :time, :rate, :cost, :image,
+        :cost_rate, :bill_rate, :capacity_hours,
         :monday, :tuesday, :wednesday, :thursday, :friday, :saturday, :sunday,
         NOW(), :is_active
       )
@@ -793,6 +886,9 @@ exports.createResource = async (req, res) => {
       rate: rate || null,
       cost: cost || null,
       image: image,
+      cost_rate: cost_rate || null,
+      bill_rate: bill_rate || null,
+      capacity_hours: capacity_hours || 8,
       monday: toBool(monday),
       tuesday: toBool(tuesday),
       wednesday: toBool(wednesday),
@@ -918,6 +1014,9 @@ exports.updateResource = async (req, res) => {
         \`time\` = :time,
         rate = :rate,
         cost = :cost,
+        cost_rate = :cost_rate,
+        bill_rate = :bill_rate,
+        capacity_hours = :capacity_hours,
         image = COALESCE(:image, image),
         monday = :monday,
         tuesday = :tuesday,
@@ -931,6 +1030,9 @@ exports.updateResource = async (req, res) => {
 
     const replacements = {
       id: id,
+      cost_rate: req.body.cost_rate || null,
+      bill_rate: req.body.bill_rate || null,
+      capacity_hours: req.body.capacity_hours || 8,
       resource_type: resource_type || null,
       name: name || null,
       role: role || null,
@@ -1210,6 +1312,138 @@ exports.checkHolidays = async (req, res) => {
 
   } catch (error) {
     console.error("Check Holidays Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// =============================================================================
+//  POST /api/admin/re-allocated       (FormData or JSON)
+//  body: { id | project_id, pm_id, project_manager, status }
+//  PMO se project ko naye PM ko re-allocate karna (CreateProjectPage.jsx).
+//  Naya PM = 'Pending' acceptance, status = 're-allocated', history me entry.
+// =============================================================================
+exports.reallocateProject = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    // ensure history + pm columns exist
+    const projectCols = [
+      ["project_manager_id", "INT DEFAULT NULL"],
+      ["request_status", "VARCHAR(30) DEFAULT NULL"],
+      ["decline_reason", "TEXT DEFAULT NULL"],
+      ["pm_responded_at", "DATETIME DEFAULT NULL"],
+      ["assigned_at", "DATETIME DEFAULT NULL"],
+    ];
+    for (const [name, ddl] of projectCols) {
+      try { await sequelize.query(`ALTER TABLE projects ADD COLUMN ${name} ${ddl}`); } catch (e) { /* exists */ }
+    }
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS project_pm_history (
+        id INT NOT NULL AUTO_INCREMENT,
+        project_id INT NOT NULL,
+        project_name VARCHAR(255) DEFAULT NULL,
+        action VARCHAR(30) NOT NULL,
+        pm_id INT DEFAULT NULL,
+        pm_name VARCHAR(150) DEFAULT NULL,
+        previous_pm_id INT DEFAULT NULL,
+        previous_pm_name VARCHAR(150) DEFAULT NULL,
+        reassigned_to_id INT DEFAULT NULL,
+        reassigned_to_name VARCHAR(150) DEFAULT NULL,
+        reason TEXT DEFAULT NULL,
+        performed_by INT DEFAULT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_pmhist_project (project_id),
+        KEY idx_pmhist_action (action)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    const projectId = Number(req.body.project_id || req.body.id);
+    if (!projectId) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: "project id is required" });
+    }
+
+    // "Ashu (Freelancer)" -> "Ashu"
+    const cleanName = String(req.body.project_manager || "")
+      .replace(/\s*\((In-house|Freelancer)\)\s*$/i, "")
+      .trim() || null;
+
+    // FE galti se pm_id = projectId bhejta hai — naam se resolve karo
+    let pmId = Number(req.body.pm_id) || null;
+    if ((!pmId || pmId === projectId) && cleanName) {
+      const u = await sequelize.query(
+        `SELECT id FROM users WHERE name = :n AND LOWER(role) = 'project manager' LIMIT 1`,
+        { replacements: { n: cleanName }, type: sequelize.QueryTypes.SELECT, transaction: t }
+      );
+      pmId = u[0]?.id || null;
+    }
+
+    const existing = await sequelize.query(
+      `SELECT id, project_name, project_manager, project_manager_id FROM projects WHERE id = :id LIMIT 1`,
+      { replacements: { id: projectId }, type: sequelize.QueryTypes.SELECT, transaction: t }
+    );
+    if (existing.length === 0) {
+      await t.rollback();
+      return res.status(404).json({ success: false, message: "Project not found" });
+    }
+    const prev = existing[0];
+
+    await sequelize.query(
+      `
+      UPDATE projects SET
+        project_manager    = :pmName,
+        project_manager_id = :pmId,
+        status             = :status,
+        request_status     = 'Pending',
+        decline_reason     = NULL,
+        pm_responded_at    = NULL,
+        assigned_at        = NOW()
+      WHERE id = :id
+      `,
+      {
+        replacements: {
+          id: projectId,
+          pmName: cleanName,
+          pmId,
+          status: req.body.status || "re-allocated",
+        },
+        transaction: t,
+      }
+    );
+
+    await sequelize.query(
+      `
+      INSERT INTO project_pm_history
+        (project_id, project_name, action, pm_id, pm_name, previous_pm_id, previous_pm_name,
+         reassigned_to_id, reassigned_to_name, reason, performed_by)
+      VALUES
+        (:project_id, :project_name, 're-allocated', :pm_id, :pm_name, :prev_id, :prev_name,
+         :pm_id, :pm_name, :reason, :performed_by)
+      `,
+      {
+        replacements: {
+          project_id: projectId,
+          project_name: prev.project_name,
+          pm_id: pmId,
+          pm_name: cleanName,
+          prev_id: prev.project_manager_id,
+          prev_name: prev.project_manager,
+          reason: req.body.reason || "Re-allocated by PMO",
+          performed_by: pmId,
+        },
+        transaction: t,
+      }
+    );
+
+    await t.commit();
+    return res.status(200).json({
+      success: true,
+      message: "Project re-allocated successfully",
+      data: { project_id: projectId, project_manager: cleanName, status: req.body.status || "re-allocated" },
+    });
+  } catch (error) {
+    await t.rollback();
+    console.error("reallocateProject error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

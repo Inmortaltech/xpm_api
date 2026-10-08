@@ -1,5 +1,0 @@
-◇ injected env (7) from .env // tip: ⌘ override existing { override: true }
-◇ injected env (0) from .env // tip: ⌘ enable debugging { debug: true }
-Server running on port \\.\pipe\e9da1bc2-1db7-40ab-b4d0-a6c9c5a8048c
- DB Connected
-Tables synced
